@@ -514,7 +514,11 @@ onMounted(() => {
 
 <style scoped>
 .admin-container {
-  min-height: 100vh;
+  height: var(--app-height);
+  min-height: -webkit-fill-available;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
   background: var(--bg-primary);
 }
 
@@ -952,6 +956,30 @@ onMounted(() => {
 
 /* Responsive */
 @media (max-width: 640px) {
+  .admin-header {
+    padding: 0 12px;
+  }
+
+  .logo span {
+    font-size: 14px;
+  }
+
+  .logout-btn {
+    padding: 8px 10px;
+  }
+
+  .logout-btn span {
+    display: none;
+  }
+
+  .admin-content {
+    padding: 12px;
+  }
+
+  .config-section {
+    padding: 16px;
+  }
+
   .form-grid {
     grid-template-columns: 1fr;
   }
@@ -970,6 +998,22 @@ onMounted(() => {
 
   .tabs button {
     flex: 1 1 45%;
+    min-height: 44px;
+  }
+
+  .tabs button span {
+    font-size: 12px;
+  }
+
+  .form-group input,
+  .form-group select,
+  .save-btn,
+  .add-btn,
+  .login-btn,
+  .delete-btn,
+  .back-link,
+  .logout-btn {
+    min-height: 44px;
   }
 }
 

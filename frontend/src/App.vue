@@ -25,7 +25,8 @@ const bgStyle = computed(() => {
 <style>
 #app {
   width: 100%;
-  height: 100vh;
+  height: var(--app-height);
+  min-height: -webkit-fill-available;
   overflow: hidden;
   background: var(--bg-primary);
   position: relative;
