@@ -99,13 +99,17 @@ export async function adminRoutes(fastify: FastifyInstance) {
 
   // 认证钩子 - 应用于所有非登录的admin路由
   fastify.addHook('onRequest', async (request: FastifyRequest, reply: FastifyReply) => {
+    const urlPath = request.url.split('?')[0];
+    const isAdminRoute = urlPath.includes('/admin');
+    const isLoginRoute = request.method === 'POST' && urlPath.endsWith('/admin/login');
+
     // 跳过登录路由
-    if (request.url === '/admin/login' && request.method === 'POST') {
+    if (isLoginRoute) {
       return;
     }
 
     // 其他admin路由需要认证
-    if (request.url.startsWith('/admin')) {
+    if (isAdminRoute) {
       await authMiddleware(request, reply);
       if (reply.sent) return;
       await adminGuard(request, reply);
