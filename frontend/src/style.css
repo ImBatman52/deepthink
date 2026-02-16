@@ -161,6 +161,16 @@ a:hover {
   50% { box-shadow: 0 0 20px rgba(34, 197, 94, 0.4); }
 }
 
+@keyframes pulseScale {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.12); opacity: 0.85; }
+}
+
+@keyframes expertCardIn {
+  from { opacity: 0; transform: translateY(8px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
 @keyframes typing {
   0% { opacity: 0.3; }
   50% { opacity: 1; }

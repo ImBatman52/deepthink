@@ -97,7 +97,7 @@
       </header>
 
       <!-- Chat Area -->
-      <div class="chat-area" ref="chatAreaRef">
+      <div class="chat-area" ref="chatAreaRef" @scroll="handleChatScroll">
         <!-- Empty State -->
         <div v-if="messages.length === 0 && !thinking.active" class="empty-state">
           <div class="empty-icon">
@@ -436,6 +436,9 @@ const isTablet = ref(window.matchMedia('(min-width: 769px) and (max-width: 1024p
 const showDeleteConfirm = ref(false);
 const pendingDeleteSessionId = ref<string | null>(null);
 const copiedMsgId = ref<string | null>(null);
+const timerTick = ref(0);
+let timerInterval: ReturnType<typeof setInterval> | null = null;
+const userHasScrolledUp = ref(false);
 
 const sessions = computed(() => chatStore.sortedSessions);
 const currentSessionId = computed(() => chatStore.currentSessionId);
@@ -497,9 +500,26 @@ function formatDuration(ms: number): string {
 }
 
 function formatTimer(): string {
+  // timerTick dependency forces re-computation every second
+  void timerTick.value;
   if (!thinking.value.startTime) return '0s';
   const elapsed = Date.now() - thinking.value.startTime;
   return formatDuration(elapsed);
+}
+
+function startTimer() {
+  stopTimer();
+  timerInterval = setInterval(() => {
+    timerTick.value++;
+  }, 1000);
+}
+
+function stopTimer() {
+  if (timerInterval) {
+    clearInterval(timerInterval);
+    timerInterval = null;
+  }
+  timerTick.value = 0;
 }
 
 function getStatusText(): string {
@@ -593,13 +613,18 @@ function toggleExpertExpand(msg: Message, expertId: string) {
 function isInExpandedRow(msg: Message, expertId: string, idx: number): boolean {
   if (!msg._expandedExpert) return false;
 
-  // 找到展开的专家的索引
   const expandedIdx = msg.experts?.findIndex(e => e.id === msg._expandedExpert);
   if (expandedIdx === undefined || expandedIdx === -1) return false;
 
-  // 计算每行2个，判断是否在同一行
-  const expandedRow = Math.floor(expandedIdx / 2);
-  const currentRow = Math.floor(idx / 2);
+  // Detect actual column count from the grid container width
+  // Grid uses minmax(280px, 1fr), so columns = floor(containerWidth / 280) or 1
+  const gridEl = document.querySelector('.experts-grid') as HTMLElement | null;
+  const cols = gridEl
+    ? Math.max(1, Math.floor(gridEl.clientWidth / 280))
+    : 2;
+
+  const expandedRow = Math.floor(expandedIdx / cols);
+  const currentRow = Math.floor(idx / cols);
 
   return expandedRow === currentRow && expertId !== msg._expandedExpert;
 }
@@ -674,6 +699,7 @@ async function sendMessage() {
   chatStore.addMessage(userMessage);
   chatStore.setLoading(true);
   chatStore.startThinking();
+  startTimer();
 
   await nextTick();
   scrollToBottom();
@@ -754,9 +780,10 @@ function handleWebSocketMessage(data: any, startTime: number) {
     chatStore.addMessage(aiMessage);
     chatStore.setLoading(false);
     chatStore.resetThinking();
+    stopTimer();
 
     disconnect();
-    scrollToBottom();
+    scrollToBottom(true);
   } else if (data.type === 'error') {
     finishThinking(startTime, data.message || '发生错误');
 
@@ -773,6 +800,7 @@ function finishThinking(_startTime: number, errorMessage: string) {
   });
   chatStore.setLoading(false);
   chatStore.resetThinking();
+  stopTimer();
 }
 
 function stopGeneration() {
@@ -783,26 +811,44 @@ function stopGeneration() {
     // ignore if WS already closed
   }
   disconnect();
+  stopTimer();
+
+  // Add a message so the user knows generation was stopped
+  const duration = chatStore.thinking.startTime ? Date.now() - chatStore.thinking.startTime : 0;
+  chatStore.addMessage({
+    id: (Date.now() + 1).toString(),
+    role: 'assistant',
+    content: '生成已被用户中止。',
+    experts: chatStore.thinking.experts.length > 0 ? [...chatStore.thinking.experts] : undefined,
+    duration: duration || undefined,
+    timestamp: Date.now(),
+  });
+
   chatStore.setLoading(false);
   chatStore.resetThinking();
 }
 
-function scrollToBottom() {
+function scrollToBottom(force = false) {
+  // Skip if user has intentionally scrolled up, unless forced
+  if (userHasScrolledUp.value && !force) return;
   nextTick(() => {
     if (chatAreaRef.value) {
       chatAreaRef.value.scrollTop = chatAreaRef.value.scrollHeight;
-      setTimeout(() => {
-        if (chatAreaRef.value) {
-          chatAreaRef.value.scrollTop = chatAreaRef.value.scrollHeight;
-        }
-      }, 80);
     }
   });
 }
 
-watch(messages, () => {
-  scrollToBottom();
-}, { deep: true });
+function handleChatScroll() {
+  if (!chatAreaRef.value) return;
+  const el = chatAreaRef.value;
+  // Consider "at bottom" if within 80px of the bottom
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  userHasScrolledUp.value = !atBottom;
+}
+
+watch(() => messages.value.length, () => {
+  scrollToBottom(true);
+});
 
 watch(sidebarOpen, (open) => {
   if (!isMobile.value) {
@@ -842,6 +888,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  stopTimer();
   document.body.style.overflow = '';
   window.removeEventListener('resize', handleViewportChange);
   window.removeEventListener('orientationchange', handleViewportChange);
@@ -1141,7 +1188,7 @@ onBeforeUnmount(() => {
 .connection-indicator.connecting .connection-dot,
 .connection-indicator.reconnecting .connection-dot {
   background: #f59e0b;
-  animation: pulseGlow 1.5s ease-in-out infinite;
+  animation: pulse 1.5s ease-in-out infinite;
 }
 
 .connection-indicator.connected {
@@ -1332,6 +1379,7 @@ onBeforeUnmount(() => {
 
 .spin {
   animation: spin 1s linear infinite;
+  will-change: transform;
 }
 
 /* Experts Section */
@@ -1381,9 +1429,10 @@ onBeforeUnmount(() => {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.2s ease;
   display: flex;
   flex-direction: column;
+  animation: expertCardIn 0.35s ease both;
 }
 
 .expert-card:hover {
@@ -1690,17 +1739,20 @@ onBeforeUnmount(() => {
   border-radius: 50%;
   background: var(--bg-secondary);
   border: 2px solid var(--border);
+  transition: background 0.3s ease, border-color 0.3s ease, color 0.3s ease, transform 0.3s ease;
 }
 
 .process-step.completed .step-indicator {
   background: var(--accent);
   border-color: var(--accent);
   color: white;
+  transform: scale(1.05);
 }
 
 .process-step.active .step-indicator {
   border-color: var(--accent);
-  animation: pulseGlow 2s ease-in-out infinite;
+  animation: pulseScale 2s ease-in-out infinite;
+  will-change: transform, opacity;
 }
 
 .step-spinner {
@@ -1710,6 +1762,7 @@ onBeforeUnmount(() => {
   border-top-color: transparent;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
+  will-change: transform;
 }
 
 .step-dot {
@@ -1724,6 +1777,7 @@ onBeforeUnmount(() => {
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.5px;
+  transition: color 0.3s ease;
 }
 
 .process-step.active .step-name,
@@ -1754,9 +1808,10 @@ onBeforeUnmount(() => {
   border-radius: var(--radius-md);
   padding: 12px;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all 0.2s ease, opacity 0.3s ease;
   display: flex;
   flex-direction: column;
+  animation: expertCardIn 0.35s ease both;
 }
 
 .live-expert-card:hover {
@@ -1771,6 +1826,7 @@ onBeforeUnmount(() => {
 .live-expert-card.loading {
   opacity: 0.6;
   cursor: default;
+  animation: expertCardIn 0.35s ease both, pulse 2s ease-in-out infinite;
 }
 
 .live-expert-header {
@@ -1833,6 +1889,7 @@ onBeforeUnmount(() => {
   border-top-color: white;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
+  will-change: transform;
 }
 
 .live-expert-content {
