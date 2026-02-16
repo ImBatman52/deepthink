@@ -5,11 +5,17 @@ import { z } from 'zod';
 const ChatRequestSchema = z.object({
   messages: z.array(z.object({
     role: z.enum(['system', 'user', 'assistant']),
-    content: z.string(),
-  })),
+    content: z.string().min(1).max(50000),
+  })).min(1),
   stream: z.boolean().optional(),
-  model: z.string().optional(),
+  model: z.string().max(100).optional(),
   maxRounds: z.number().min(1).max(10).optional(),
+});
+
+const DeepThinkRequestSchema = z.object({
+  query: z.string().min(1, 'Query is required').max(50000, 'Query too long'),
+  maxRounds: z.number().min(1).max(10).optional(),
+  model: z.string().max(100).optional(),
 });
 
 export async function chatRoutes(fastify: FastifyInstance) {
@@ -17,7 +23,15 @@ export async function chatRoutes(fastify: FastifyInstance) {
 
   // OpenAI 兼容的聊天端点
   fastify.post('/v1/chat/completions', async (request, reply) => {
-    const body = ChatRequestSchema.parse(request.body);
+    let body;
+    try {
+      body = ChatRequestSchema.parse(request.body);
+    } catch (err: any) {
+      return reply.code(400).send({
+        error: 'Invalid request',
+        details: err.errors || err.message,
+      });
+    }
     const { messages, stream, model, maxRounds } = body;
 
     // 提取最后一条用户消息作为查询
@@ -102,21 +116,34 @@ export async function chatRoutes(fastify: FastifyInstance) {
 
   // DeepThink 原生端点
   fastify.post('/deepthink/invoke', async (request, reply) => {
-    const { query, maxRounds, model } = request.body as any;
-
-    if (!query) {
-      return reply.code(400).send({ error: 'Query is required' });
+    let body;
+    try {
+      body = DeepThinkRequestSchema.parse(request.body);
+    } catch (err: any) {
+      return reply.code(400).send({
+        error: 'Invalid request',
+        details: err.errors || err.message,
+      });
     }
+    const { query, maxRounds, model } = body;
 
-    const result = await engine.invoke(query, { maxRounds, model });
+    try {
+      const result = await engine.invoke(query, { maxRounds, model });
 
-    return {
-      final_output: result.finalOutput,
-      structured_output: result.structuredOutput,
-      experts: result.expertsOutput,
-      review_score: result.reviewScore,
-      rounds: result.round,
-      synthesis_thoughts: result.synthesisThoughts,
-    };
+      return {
+        final_output: result.finalOutput,
+        structured_output: result.structuredOutput,
+        experts: result.expertsOutput,
+        review_score: result.reviewScore,
+        rounds: result.round,
+        synthesis_thoughts: result.synthesisThoughts,
+      };
+    } catch (err: any) {
+      request.log.error({ err }, 'DeepThink invoke failed');
+      return reply.code(500).send({
+        error: 'Processing failed',
+        message: err.message || 'Unknown error',
+      });
+    }
   });
 }

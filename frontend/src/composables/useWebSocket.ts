@@ -1,8 +1,11 @@
 import { ref, onUnmounted } from 'vue';
 
+export type ConnectionState = 'idle' | 'connecting' | 'connected' | 'error' | 'reconnecting' | 'disconnected';
+
 export function useWebSocket() {
   const ws = ref<WebSocket | null>(null);
   const isConnected = ref(false);
+  const connectionState = ref<ConnectionState>('idle');
   const reconnectAttempts = ref(0);
   const maxReconnectAttempts = 5;
   let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -72,12 +75,14 @@ export function useWebSocket() {
           ws.value.close();
         }
 
+        connectionState.value = 'connecting';
         ws.value = new WebSocket(url);
 
         // 设置连接超时
         const connectTimeout = setTimeout(() => {
           if (ws.value && ws.value.readyState !== WebSocket.OPEN) {
             ws.value.close();
+            connectionState.value = 'error';
             reject(new Error('连接超时'));
           }
         }, 10000);
@@ -85,6 +90,7 @@ export function useWebSocket() {
         ws.value.onopen = () => {
           clearTimeout(connectTimeout);
           isConnected.value = true;
+          connectionState.value = 'connected';
           reconnectAttempts.value = 0;
           startPing();
           console.log('WebSocket connected');
@@ -112,6 +118,7 @@ export function useWebSocket() {
 
         ws.value.onerror = (error) => {
           clearTimeout(connectTimeout);
+          connectionState.value = 'error';
           console.error('WebSocket error:', error);
           if (onError) onError(error);
         };
@@ -126,10 +133,14 @@ export function useWebSocket() {
 
           // 非正常关闭且未达到最大重连次数，尝试重连
           if (!event.wasClean && reconnectAttempts.value < maxReconnectAttempts) {
+            connectionState.value = 'reconnecting';
             attemptReconnect();
           } else if (event.code !== 1000) {
+            connectionState.value = 'disconnected';
             // 1000 是正常关闭
             reject(new Error(event.reason || '连接已断开'));
+          } else {
+            connectionState.value = 'idle';
           }
         };
       } catch (error) {
@@ -165,6 +176,7 @@ export function useWebSocket() {
       ws.value.close(1000, 'User initiated close');
       ws.value = null;
       isConnected.value = false;
+      connectionState.value = 'idle';
     }
 
     // 清理回调
@@ -183,6 +195,7 @@ export function useWebSocket() {
     send,
     disconnect,
     isConnected,
+    connectionState,
     reconnectAttempts,
   };
 }

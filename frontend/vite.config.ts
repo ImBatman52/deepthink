@@ -32,6 +32,13 @@ export default defineConfig(({ mode }) => {
       },
       // Increase warning threshold to avoid noise
       chunkSizeWarningLimit: 600,
+      // Production source maps for debugging
+      sourcemap: mode === 'production' ? 'hidden' : true,
+      // CSS code splitting
+      cssCodeSplit: true,
+      // Target modern browsers for smaller bundles
+      target: 'es2020',
+      minify: 'esbuild',
     },
     server: {
       host: true,
@@ -40,6 +47,19 @@ export default defineConfig(({ mode }) => {
 
       proxy: {
         '/api': {
+          target: proxyTarget,
+          changeOrigin: true,
+        },
+        '/ws': {
+          target: proxyTarget,
+          changeOrigin: true,
+          ws: true,
+        },
+        '/deepthink': {
+          target: proxyTarget,
+          changeOrigin: true,
+        },
+        '/v1': {
           target: proxyTarget,
           changeOrigin: true,
         },

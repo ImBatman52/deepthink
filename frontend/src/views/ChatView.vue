@@ -88,6 +88,12 @@
           </svg>
           DeepThink AI
         </h1>
+        <div class="header-right">
+          <span v-if="connectionState !== 'idle'" class="connection-indicator" :class="connectionState">
+            <span class="connection-dot"></span>
+            <span class="connection-label">{{ connectionLabel }}</span>
+          </span>
+        </div>
       </header>
 
       <!-- Chat Area -->
@@ -228,7 +234,7 @@
                   </div>
 
                   <!-- Message Footer -->
-                  <div class="message-footer" v-if="msg.duration || msg.rounds">
+                  <div class="message-footer">
                     <span v-if="msg.duration" class="footer-item">
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <circle cx="12" cy="12" r="10"/>
@@ -237,6 +243,15 @@
                       {{ formatDuration(msg.duration) }}
                     </span>
                     <span v-if="msg.rounds" class="footer-item">{{ msg.rounds }} 轮</span>
+                    <button class="copy-btn" @click.stop="copyMessage(msg)" :title="copiedMsgId === msg.id ? '已复制' : '复制回答'">
+                      <svg v-if="copiedMsgId !== msg.id" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                        <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
+                      </svg>
+                      <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M20 6L9 17l-5-5"/>
+                      </svg>
+                    </button>
                   </div>
                 </div>
               </div>
@@ -397,7 +412,19 @@ const md = new MarkdownIt({
 });
 
 const chatStore = useChatStore();
-const { connect, send, disconnect } = useWebSocket();
+const { connect, send, disconnect, connectionState } = useWebSocket();
+
+const connectionLabel = computed(() => {
+  const labels: Record<string, string> = {
+    idle: '',
+    connecting: '连接中',
+    connected: '已连接',
+    error: '连接错误',
+    reconnecting: '重连中',
+    disconnected: '已断开',
+  };
+  return labels[connectionState.value] || '';
+});
 
 const sidebarOpen = ref(false);
 const userInput = ref('');
@@ -405,8 +432,10 @@ const chatAreaRef = ref<HTMLElement | null>(null);
 const inputRef = ref<HTMLTextAreaElement | null>(null);
 const showThemeSettings = ref(false);
 const isMobile = ref(window.matchMedia('(max-width: 768px)').matches);
+const isTablet = ref(window.matchMedia('(min-width: 769px) and (max-width: 1024px)').matches);
 const showDeleteConfirm = ref(false);
 const pendingDeleteSessionId = ref<string | null>(null);
+const copiedMsgId = ref<string | null>(null);
 
 const sessions = computed(() => chatStore.sortedSessions);
 const currentSessionId = computed(() => chatStore.currentSessionId);
@@ -500,6 +529,7 @@ function toggleReferences(msg: Message) {
 
 function handleViewportChange() {
   isMobile.value = window.matchMedia('(max-width: 768px)').matches;
+  isTablet.value = window.matchMedia('(min-width: 769px) and (max-width: 1024px)').matches;
   if (!sidebarOpen.value) {
     document.body.style.overflow = '';
   }
@@ -511,6 +541,49 @@ function formatUrl(url: string): string {
     return urlObj.hostname;
   } catch {
     return url;
+  }
+}
+
+async function copyMessage(msg: Message) {
+  try {
+    await navigator.clipboard.writeText(msg.content);
+    copiedMsgId.value = msg.id;
+    setTimeout(() => {
+      copiedMsgId.value = null;
+    }, 2000);
+  } catch {
+    // Fallback for older browsers
+    const textarea = document.createElement('textarea');
+    textarea.value = msg.content;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    document.body.removeChild(textarea);
+    copiedMsgId.value = msg.id;
+    setTimeout(() => {
+      copiedMsgId.value = null;
+    }, 2000);
+  }
+}
+
+function handleGlobalKeydown(e: KeyboardEvent) {
+  // Ctrl/Cmd + Shift + N: New chat
+  if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'N') {
+    e.preventDefault();
+    createNewChat();
+    return;
+  }
+  // Escape: close sidebar or theme settings or delete confirm
+  if (e.key === 'Escape') {
+    if (showDeleteConfirm.value) {
+      cancelDeleteSession();
+    } else if (showThemeSettings.value) {
+      showThemeSettings.value = false;
+    } else if (sidebarOpen.value) {
+      sidebarOpen.value = false;
+    }
   }
 }
 
@@ -704,6 +777,12 @@ function finishThinking(_startTime: number, errorMessage: string) {
 }
 
 function stopGeneration() {
+  // Send cancel command to server before disconnecting
+  try {
+    send({ type: 'cancel' });
+  } catch {
+    // ignore if WS already closed
+  }
   disconnect();
   chatStore.setLoading(false);
   chatStore.resetThinking();
@@ -753,6 +832,12 @@ onMounted(() => {
   window.addEventListener('resize', handleViewportChange, { passive: true });
   window.addEventListener('orientationchange', handleViewportChange, { passive: true });
   window.visualViewport?.addEventListener('resize', handleViewportChange, { passive: true });
+  window.addEventListener('keydown', handleGlobalKeydown);
+
+  // Focus input on desktop
+  if (!isMobile.value) {
+    nextTick(() => inputRef.value?.focus());
+  }
 
   scrollToBottom();
 });
@@ -762,6 +847,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', handleViewportChange);
   window.removeEventListener('orientationchange', handleViewportChange);
   window.visualViewport?.removeEventListener('resize', handleViewportChange);
+  window.removeEventListener('keydown', handleGlobalKeydown);
 });
 </script>
 
@@ -1024,6 +1110,57 @@ onBeforeUnmount(() => {
 
 .header-title svg {
   color: var(--accent);
+}
+
+.header-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+}
+
+.connection-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  font-weight: 500;
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  transition: all 0.2s;
+}
+
+.connection-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: background 0.2s;
+}
+
+.connection-indicator.connecting .connection-dot,
+.connection-indicator.reconnecting .connection-dot {
+  background: #f59e0b;
+  animation: pulseGlow 1.5s ease-in-out infinite;
+}
+
+.connection-indicator.connected {
+  color: var(--accent);
+}
+
+.connection-indicator.connected .connection-dot {
+  background: var(--accent);
+}
+
+.connection-indicator.error .connection-dot,
+.connection-indicator.disconnected .connection-dot {
+  background: var(--danger);
+}
+
+.connection-indicator.error,
+.connection-indicator.disconnected {
+  color: var(--danger);
 }
 
 .header-actions {
@@ -1462,6 +1599,7 @@ onBeforeUnmount(() => {
 /* Message Footer */
 .message-footer {
   display: flex;
+  align-items: center;
   gap: 12px;
   margin-top: 12px;
   padding-top: 12px;
@@ -1474,6 +1612,34 @@ onBeforeUnmount(() => {
   gap: 4px;
   font-size: 11px;
   color: var(--text-muted);
+}
+
+.copy-btn {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s;
+  opacity: 0;
+}
+
+.message-bubble:hover .copy-btn,
+.copy-btn:focus {
+  opacity: 1;
+}
+
+.copy-btn:hover {
+  background: var(--bg-tertiary);
+  border-color: var(--border);
+  color: var(--accent);
 }
 
 /* Process Flow */
@@ -1949,6 +2115,39 @@ onBeforeUnmount(() => {
   .app-container.sidebar-active .chat-area,
   .app-container.sidebar-active .input-area {
     pointer-events: none;
+  }
+
+  .copy-btn {
+    opacity: 1;
+  }
+}
+
+/* Tablet Styles */
+@media (min-width: 769px) and (max-width: 1024px) {
+  .sidebar {
+    width: 240px;
+  }
+
+  .chat-area {
+    padding: 20px;
+  }
+
+  .messages-container {
+    max-width: 100%;
+  }
+
+  .experts-grid,
+  .live-experts-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .features {
+    gap: 12px;
+  }
+
+  .feature {
+    padding: 10px 12px;
+    font-size: 12px;
   }
 }
 

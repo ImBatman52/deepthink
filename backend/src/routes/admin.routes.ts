@@ -35,8 +35,8 @@ const SearchConfigSchema = z.object({
 });
 
 const LoginSchema = z.object({
-  username: z.string(),
-  password: z.string(),
+  username: z.string().min(1, 'Username is required').max(50),
+  password: z.string().min(1, 'Password is required').max(200),
 });
 
 const UpdateAdminAccountSchema = z.object({
@@ -69,12 +69,18 @@ export async function adminRoutes(fastify: FastifyInstance) {
 
   // 登录 - 不需要认证
   fastify.post('/admin/login', async (request, reply) => {
-    const { username, password } = LoginSchema.parse(request.body);
+    let parsed;
+    try {
+      parsed = LoginSchema.parse(request.body);
+    } catch (err: any) {
+      return reply.code(400).send({ error: '请输入用户名和密码' });
+    }
+    const { username, password } = parsed;
 
     const user = configStore.verifyUser(username, password);
 
     if (!user) {
-      return reply.code(401).send({ error: 'Invalid credentials' });
+      return reply.code(401).send({ error: '用户名或密码错误' });
     }
 
     // 生成JWT Token
@@ -131,7 +137,12 @@ export async function adminRoutes(fastify: FastifyInstance) {
 
   // 更新 LLM 配置
   fastify.put('/admin/config/llm', async (request, reply) => {
-    const config = LLMConfigSchema.parse(request.body);
+    let config;
+    try {
+      config = LLMConfigSchema.parse(request.body);
+    } catch (err: any) {
+      return reply.code(400).send({ error: '无效的 LLM 配置', details: err.errors });
+    }
     configStore.setLLMConfig(config);
     // Invalidate cached LLM provider instances since config changed
     LLMFactory.clearCache();
@@ -140,7 +151,12 @@ export async function adminRoutes(fastify: FastifyInstance) {
 
   // 更新系统参数
   fastify.put('/admin/config/system', async (request, reply) => {
-    const params = SystemParamsSchema.parse(request.body);
+    let params;
+    try {
+      params = SystemParamsSchema.parse(request.body);
+    } catch (err: any) {
+      return reply.code(400).send({ error: '无效的系统参数', details: err.errors });
+    }
     configStore.setSystemParams(params);
     return { success: true, params: configStore.getSystemParams() };
   });
@@ -152,7 +168,12 @@ export async function adminRoutes(fastify: FastifyInstance) {
 
   // 更新搜索配置
   fastify.put('/admin/config/search', async (request, reply) => {
-    const config = SearchConfigSchema.parse(request.body);
+    let config;
+    try {
+      config = SearchConfigSchema.parse(request.body);
+    } catch (err: any) {
+      return reply.code(400).send({ error: '无效的搜索配置', details: err.errors });
+    }
     configStore.setSearchConfig(config);
     return { success: true, config: maskSensitiveConfig(configStore.getSearchConfig()) };
   });
@@ -177,25 +198,44 @@ export async function adminRoutes(fastify: FastifyInstance) {
   // 更新当前管理员账号（用户名/密码）并清理为单管理员模式
   fastify.put('/admin/account', async (request, reply) => {
     const currentUser = (request as any).user as JWTPayload;
-    const { username, newPassword } = UpdateAdminAccountSchema.parse(request.body);
+    let parsed;
+    try {
+      parsed = UpdateAdminAccountSchema.parse(request.body);
+    } catch (err: any) {
+      return reply.code(400).send({ error: '无效的账号信息', details: err.errors });
+    }
+    const { username, newPassword } = parsed;
 
-    configStore.updateUserCredentials(parseInt(currentUser.userId), username, newPassword);
-    configStore.cleanupToSingleAdmin(parseInt(currentUser.userId));
-
-    return { success: true };
+    try {
+      configStore.updateUserCredentials(parseInt(currentUser.userId), username, newPassword);
+      configStore.cleanupToSingleAdmin(parseInt(currentUser.userId));
+      return { success: true };
+    } catch (err: any) {
+      return reply.code(500).send({ error: err.message || '账号更新失败' });
+    }
   });
 
   // 测试 LLM 连接
   fastify.post('/admin/test-llm', async (request, reply) => {
     try {
       const llm = LLMFactory.createLLM();
-      const result = await llm.complete({
+
+      // Add timeout for the test call
+      const timeoutMs = 30_000;
+      let timer: ReturnType<typeof setTimeout>;
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('LLM 测试超时（30秒）')), timeoutMs);
+      });
+
+      const resultPromise = llm.complete({
         messages: [
           { role: 'user', content: '只输出你好' }
         ],
         temperature: 0.7,
         maxTokens: 100
       });
+
+      const result = await Promise.race([resultPromise, timeout]).finally(() => clearTimeout(timer!));
 
       return {
         success: true,

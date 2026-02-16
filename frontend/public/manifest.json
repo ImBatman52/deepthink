@@ -1,0 +1,19 @@
+{
+  "name": "DeepThink AI",
+  "short_name": "DeepThink",
+  "description": "多专家协作的AI深度思考系统",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#09090b",
+  "theme_color": "#22c55e",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/vite.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["productivity", "utilities"]
+}

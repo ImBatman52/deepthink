@@ -80,6 +80,53 @@ const WHITESPACE_RE = /\s+/g;
 /** Maximum concurrent expert LLM calls to avoid rate-limiting and resource exhaustion. */
 const MAX_EXPERT_CONCURRENCY = 4;
 
+/** Timeout per individual expert LLM call (ms). Prevents one stuck call from blocking the pipeline. */
+const EXPERT_TIMEOUT_MS = 120_000; // 2 minutes
+
+/** Max retries for transient LLM failures per expert. */
+const EXPERT_MAX_RETRIES = 2;
+const EXPERT_RETRY_DELAY_MS = 1_000;
+
+/** Timeout for planner & synthesizer calls. */
+const PLANNER_TIMEOUT_MS = 60_000;
+const SYNTHESIZER_TIMEOUT_MS = 120_000;
+
+/**
+ * Wraps a promise with a timeout. Rejects with a descriptive error if the
+ * promise does not settle within `ms` milliseconds.
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Retry an async function on transient failures.
+ */
+async function retryOnTransient<T>(
+  fn: () => Promise<T>,
+  retries: number,
+  delayMs: number,
+  label: string,
+): Promise<T> {
+  let lastError: Error | undefined;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      lastError = err;
+      const isTransient = /timeout|ECONNRESET|ECONNREFUSED|429|502|503|504|rate/i.test(err.message || '');
+      if (!isTransient || attempt === retries) break;
+      console.warn(`[${label}] Attempt ${attempt + 1} failed (${err.message}), retrying in ${delayMs}ms...`);
+      await new Promise(r => setTimeout(r, delayMs * (attempt + 1)));
+    }
+  }
+  throw lastError;
+}
+
 function isFileRelatedQuery(query: string): boolean {
   const q = (query || '').toLowerCase();
   return FILE_REQUIRED_HINTS.some(k => q.includes(k));
@@ -207,7 +254,15 @@ function limitConcurrency<T>(
 }
 
 export class DeepThinkEngine {
+  private aborted = false;
+
+  /** Abort a running stream (e.g. when WebSocket disconnects). */
+  abort() {
+    this.aborted = true;
+  }
+
   async *stream(query: string, config?: any): AsyncGenerator<any> {
+    this.aborted = false;
     const llmCfg = llmConfig.get();
     const llm = LLMFactory.createLLM({ ...llmCfg, ...config });
     const fileContext = config?.fileContext || '';
@@ -240,13 +295,17 @@ export class DeepThinkEngine {
       ? `用户上传了文件，文件内容摘要：${meaningfulFileText.substring(0, 500)}...`
       : '';
 
-    const plannerResponse = await llm.complete({
-      messages: [
-        { role: 'system', content: 'You are a planning AI. Respond only with valid JSON.' },
-        { role: 'user', content: PLANNER_PROMPT.replace('{query}', query).replace('{file_hint}', fileHint) },
-      ],
-      temperature: 0.7,
-    });
+    const plannerResponse = await withTimeout(
+      llm.complete({
+        messages: [
+          { role: 'system', content: 'You are a planning AI. Respond only with valid JSON.' },
+          { role: 'user', content: PLANNER_PROMPT.replace('{query}', query).replace('{file_hint}', fileHint) },
+        ],
+        temperature: 0.7,
+      }),
+      PLANNER_TIMEOUT_MS,
+      'Planner',
+    );
 
     const plan = parseJSONSafely(plannerResponse.content);
     const experts = normalizeExperts(plan.experts || [], plan.complexity);
@@ -333,12 +392,21 @@ export class DeepThinkEngine {
         .replace('{query}', query)
         .replace('{context}', contextStr);
 
-      const expertResponse = await llm.complete({
-        messages: [
-          { role: 'user', content: expertPrompt },
-        ],
-        temperature: 0.7,
-      });
+      const expertResponse = await retryOnTransient(
+        () => withTimeout(
+          llm.complete({
+            messages: [
+              { role: 'user', content: expertPrompt },
+            ],
+            temperature: 0.7,
+          }),
+          EXPERT_TIMEOUT_MS,
+          `Expert[${expert.role}]`,
+        ),
+        EXPERT_MAX_RETRIES,
+        EXPERT_RETRY_DELAY_MS,
+        `Expert[${expert.role}]`,
+      );
 
       const thoughtsMatch = expertResponse.content.match(THOUGHTS_RE);
       const responseMatch = expertResponse.content.match(RESPONSE_RE);
@@ -370,6 +438,10 @@ export class DeepThinkEngine {
     const total = experts.length;
 
     while (completed < total) {
+      if (this.aborted) {
+        yield { type: 'complete', state: { ...state, finalOutput: 'Generation was cancelled.' } };
+        return;
+      }
       let result: ExpertResult;
       if (resultsQueue.length > 0) {
         result = resultsQueue.shift()!;
@@ -399,12 +471,21 @@ export class DeepThinkEngine {
       .replace('{query}', query)
       .replace('{experts}', expertsText);
 
-    const synthesizerResponse = await llm.complete({
-      messages: [
-        { role: 'user', content: synthesizerPrompt },
-      ],
-      temperature: 0.7,
-    });
+    if (this.aborted) {
+      yield { type: 'complete', state: { ...state, finalOutput: 'Generation was cancelled.' } };
+      return;
+    }
+
+    const synthesizerResponse = await withTimeout(
+      llm.complete({
+        messages: [
+          { role: 'user', content: synthesizerPrompt },
+        ],
+        temperature: 0.7,
+      }),
+      SYNTHESIZER_TIMEOUT_MS,
+      'Synthesizer',
+    );
 
     state.finalOutput = synthesizerResponse.content;
     yield { type: 'node_complete', node: 'synthesizer', state };
